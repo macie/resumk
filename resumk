@@ -1,0 +1,250 @@
+#!/bin/sh
+# resumk - management tool for LaTeX-based resumes.
+# SPDX-License-Identifier: MIT
+# Copyright 2024 Maciej Żok <https://github.com/macie/resumk>
+set -eu
+
+# following line is used by `make cli-release`
+RMK_VERSION='24.03-pre'
+
+#
+#   DEFAULTS
+#
+RMK_TEMPLATE='./template-cv.tex'
+RMK_WORKING_DIR='./ongoing'
+RMK_PREVIEW_DIR='/tmp/resumk-preview'
+
+
+#
+#   FUNCTIONS
+#
+
+# rmk_inform prints a line with the message to stderr. Inside a capable
+# interactive shell it prints the message in color.
+#
+# Global variables:
+#   - NO_COLOR
+#
+# Usage: rmk_inform "message"
+rmk_inform() {
+	if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
+		printf '\033[0;32m[resumk]\033[0m %s\n' "$1" >&2
+	else
+		printf '[resumk] %s\n' "$1" >&2
+	fi
+}
+
+# rmk_enter saves user-provided value into variable. In a capable interactive 
+# shell it prints the message in color.
+#
+# Global variables:
+#   - NO_COLOR
+#
+# Usage: rmk_enter "value description" VARIABLE_NAME
+rmk_enter() {
+	if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
+		printf '\033[0;32m[resumk]\033[0m Enter %s: ' "$1" >&2
+	else
+		printf '[resumk] Enter %s: ' "$1" >&2
+	fi
+	read -r "$2"
+}
+
+# rmk_create interactively creates new resume. It prints:
+#   - names of created files - to stdout
+#   - debug & error messages - to stderr.
+#
+# Usage: rmk_create ROOT_DIR TEX_TEMPLATE
+rmk_create() {
+	RMK_WORKING_DIR="$1"
+	RMK_TEMPLATE="$2"
+
+	rmk_inform "Prepare resume inside '${RMK_WORKING_DIR}/' from '${RMK_TEMPLATE}' template"
+	if [ ! -f "${RMK_TEMPLATE}" ]; then
+		printf 'ERROR: template does not exist: %s\n' "${RMK_TEMPLATE}" >&2
+		return 66  # EX_NOINPUT
+	fi
+
+	rmk_enter "company name" RMK_COMPANY
+	rmk_enter "position title" RMK_POSITION
+	rmk_enter "keywords (comma separated)" RMK_KEYWORDS
+
+	RMK_TEX_PATH=$(echo "${RMK_WORKING_DIR}/${RMK_COMPANY:-unknown}/${RMK_COMPANY:-unknown}-${RMK_POSITION:-unknown}-cv.tex" | tr ' ' '_' | tr '[:upper:]' '[:lower:]' | tr '&' 'n')
+	RMK_METADATA_PATH="${RMK_TEX_PATH%-cv.tex}.md"
+	RMK_COMP_DIR=$(dirname "${RMK_TEX_PATH}")
+
+
+	rmk_inform "Prepare '$(basename "${RMK_COMP_DIR}")/' dir for company applications"
+	mkdir -p "${RMK_COMP_DIR}"
+	echo "${RMK_COMP_DIR}"
+
+
+	rmk_inform "Prepare '$(basename "${RMK_TEX_PATH}")' resume"
+	sed -e "s/%%POSITION%%/${RMK_POSITION:-<UNKNOWN>}/" -e "s/%%COMPANY%%/${RMK_COMPANY:-<UNKNOWN>}/" -e "s/%%KEYWORDS%%/${RMK_KEYWORDS:-}/" "${RMK_TEMPLATE}" >"${RMK_TEX_PATH}"
+	echo "${RMK_TEX_PATH}"
+
+
+	rmk_inform "Prepare '$(basename "${RMK_METADATA_PATH}")' with process metadata"
+	cat >"${RMK_METADATA_PATH}" <<-EOF
+		# ${RMK_COMPANY:-<UNKNOWN>}: ${RMK_POSITION:-<UNKNOWN>}
+
+		- Status: created
+		- Dates:
+		    - Offer annoucement:
+		    - CV sent:
+		    - Finished:
+		- Recruiter:
+		- Expected salary:
+
+		## Notes
+
+		## Offer
+
+		## Consents
+
+	EOF
+	echo "${RMK_METADATA_PATH}"
+
+	rmk_inform "All files created"
+}
+
+# rmk_shutdown cleans up the artifacts created by rmk_preview(). When
+# called with no arguments, rmk_shutdown() exits with 0.
+#
+# Global variables:
+#   - RMK_PREVIEW_DIR
+#
+# Usage: rmk_shutdown [exit-code]
+rmk_shutdown() {
+	rmk_inform "Delete '${RMK_PREVIEW_DIR}/' working dir"
+    rm -rf "${RMK_PREVIEW_DIR}"
+    exit "${1:-0}"
+}
+
+# rmk_preview regenerates PDF resume after each source change. It prints debug
+# messages to stderr.
+#
+# Global variables:
+#   - RMK_PREVIEW_DIR
+#
+# Usage: rmk_preview TEX_FILE [PREVIEW_DIR]
+rmk_preview() {
+	RMK_WATCHED_PATH="$1"
+	RMK_TEMP_DIR="${2:-${RMK_PREVIEW_DIR}}"
+
+	RMK_TEX_ENGINE=xelatex
+	RMK_WATCHED_FILE=$(basename "${RMK_WATCHED_PATH}")
+	RMK_PDF_PREVIEW="${RMK_TEMP_DIR}/${RMK_WATCHED_FILE%.*}.pdf"
+	RMK_WATCH_TIMEOUT=3
+
+	rmk_inform "Prepare '${RMK_WATCHED_FILE%.*}.pdf' inside '${RMK_TEMP_DIR}/'"
+	${RMK_TEX_ENGINE} -interaction=nonstopmode -file-line-error -output-directory="${RMK_TEMP_DIR}" "${RMK_WATCHED_PATH}" | while read -r line; do echo "  ${line}"; done || rmk_shutdown 1
+	if [ ! -f "${RMK_PDF_PREVIEW}" ]; then
+		printf 'ERROR: preview does not exist: %s\n' "${RMK_PDF_PREVIEW}" >&2
+		return 66  # EX_NOINPUT
+	fi
+	
+	rmk_inform "Open '${RMK_PDF_PREVIEW}' in default PDF viewer"
+	xdg-open "${RMK_PDF_PREVIEW}" || rmk_shutdown 1
+
+	rmk_inform "Watch '${RMK_WATCHED_FILE}' for changes...  (CTRL-C to exit)"
+	MODIFIED_TIME=$(stat --printf=%y "${RMK_WATCHED_PATH}" || rmk_shutdown 1)
+	while true; do
+		NEW_TIME=$(stat --printf=%y "${RMK_WATCHED_PATH}" || rmk_shutdown 1)
+		if [ "${NEW_TIME}" != "${MODIFIED_TIME}" ]; then
+			rmk_inform "Update '${RMK_PDF_PREVIEW}'"
+			MODIFIED_TIME=${NEW_TIME}
+			${RMK_TEX_ENGINE} -interaction=nonstopmode -file-line-error -output-directory="${RMK_TEMP_DIR}" "${RMK_WATCHED_PATH}" | while read -r line; do echo "  ${line}"; done || rmk_shutdown 1
+			rmk_inform "Watch '${RMK_WATCHED_FILE}' for changes...  (CTRL-C to exit)"
+		fi
+		sleep "${RMK_WATCH_TIMEOUT}"
+	done
+}
+
+#
+#   MAIN ROUTINE
+#
+{
+	# Gracefully handle: Ctrl-C, terminal closing and nice process termination.
+	trap rmk_shutdown INT HUP TERM
+
+	# Print in color on capable terminals when NO_COLOR environment variable is
+	# not set. TERM environment variable is used to detect terminal type.
+	# Not set TERM means dumb terminal (for example: CI/CD terminal).
+	if [ -z "${NO_COLOR:-}" ] && [ "$(TERM=${TERM:-dumb} tput colors)" -lt 8 ]; then
+		NO_COLOR='YES'
+	fi
+
+	if [ $# -eq 0 ]; then
+		RMK_NEW_FILE=$(rmk_create "${RMK_WORKING_DIR}" "${RMK_TEMPLATE}" | grep '.tex')
+		RMK_PREVIEW_DIR=$(mktemp -d -t resumk.XXXXXX)
+		rmk_preview "${RMK_NEW_FILE}" "${RMK_PREVIEW_DIR}"
+		exit 0  # EX_OK
+	fi
+
+	case $1 in
+		-h)
+			cat >&2 <<-'EOF'
+				resumk - management tool for LaTeX-based resumes.
+
+				Usage:
+				   resumk create [-d DIR] [-t FILE]
+				   resumk preview FILE
+				   resumk [-h] [-v]
+
+				Commands:
+				   create       Interactively create new application files.
+				   preview      Update PDF preview after FILE change. Preview is generated in
+				                a temporary directory and opened with the default PDF viewer.
+
+				Options:
+				  -d DIR        Output directory (default: ./ongoing)
+				  -t TEMPLATE   LaTeX template file (default: ./template-cv.tex)
+				  -h            Print this help and exit
+				  -v            Print version and exit
+
+				When no command is specified, it runs in interactive mode.
+			EOF
+			;;
+		-v)
+			printf 'resumk %s\n' "${RMK_VERSION}" >&2
+			;;
+		create)
+			shift
+			if [ $# -gt 0 ]; then
+				case "$1" in
+					-d)
+						RMK_WORKING_DIR="$2"
+						shift 2
+						;;
+					--template)
+						RMK_TEMPLATE="$2"
+						shift 2
+						;;
+					*)
+						printf 'Error: unknown create option: %s\n\n' "$1" >&2
+						printf 'Usage: %s create [-d DIR] [--template TEX_FILE]\n' "$0" >&2
+						exit 64  # EX_USAGE
+						;;
+				esac
+			fi
+			rmk_create "${RMK_WORKING_DIR}" "${RMK_TEMPLATE}"
+			;;
+		preview)
+			shift
+			if [ $# -ne 1 ]; then
+    			printf 'Error: invalid preview usage\n\n' >&2
+				printf 'Usage: %s preview TEX_FILE\n' "$0" >&2
+				exit 64  # EX_USAGE
+			fi
+			RMK_PREVIEW_DIR=$(mktemp -d -t resumk.XXXXXX)
+			rmk_preview "$1" "${RMK_PREVIEW_DIR}"
+			;;
+		*)
+			printf 'ERROR: invalid usage. See: %s -h\n' "$0" >&2
+			exit 64  # EX_USAGE
+			;;
+	esac
+
+	exit 0  # EX_OK
+}

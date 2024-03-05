@@ -1,0 +1,94 @@
+# This Makefile intended to be POSIX-compliant (2018 edition with .PHONY target).
+#
+# .PHONY targets are used by task definintions.
+#
+# More info:
+#  - docs: <https://pubs.opengroup.org/onlinepubs/9699919799/utilities/make.html>
+#  - .PHONY: <https://www.austingroupbugs.net/view.php?id=523>
+#
+.POSIX:
+.SUFFIXES:
+
+
+#
+# PUBLIC MACROS
+#
+
+CLI      = resumk
+DESTDIR  = ./dist
+LINT     = shellcheck
+TEST     = ./unittest
+DOWNLOAD = curl -fLO     # for OpenBSD use: ftp -V
+SHA256   = sha256sum -c  # for OpenBSD use: sha256 -c
+
+
+#
+# INTERNAL MACROS
+#
+
+TEST_SRC=https://github.com/macie/unittest.sh/releases/latest/download/unittest
+
+
+#
+# DEVELOPMENT TASKS
+#
+
+.PHONY: all
+all: test check
+
+.PHONY: clean
+clean:
+	@echo '# Delete test runner:' >&2
+	rm -f $(TEST)
+	@echo '# Delete bulid directory' >&2
+	rm -rf $(DESTDIR)
+
+.PHONY: info
+info:
+	@printf '# OS info: '
+	@uname -rsv;
+	@echo '# Development dependencies:'
+	@echo; $(LINT) -V || true
+	@echo; $(TEST) -v || true
+	@echo; $(DOWNLOAD) -V || true
+	@echo; $(SHA256) --version || true
+	@echo '# Environment variables:'
+	@env || true
+
+.PHONY: check
+check: $(LINT)
+	@printf '# Static analysis: $(LINT) $(CLI) ./tests/*.sh' >&2
+	@$(LINT) $(CLI) ./tests/*.sh
+
+.PHONY: test
+test: $(TEST)
+	@echo '# Unit tests: $(TEST)' >&2
+	@$(TEST)
+
+.PHONY: install
+install:
+	@echo '# Install in /usr/local/bin' >&2
+	mkdir -p /usr/local/bin; cp $(CLI) /usr/local/bin/
+
+.PHONY: dist
+dist:
+	@echo '# Copy CLI executable to $(DESTDIR)' >&2
+	@mkdir -p $(DESTDIR); cp $(CLI) $(DESTDIR)/
+	@echo '# Add executable checksum to: $(DESTDIR)/$(CLI).sha256sum' >&2
+	@cd $(DESTDIR); sha256sum $(CLI) >$(CLI).sha256sum
+
+
+#
+# DEPENDENCIES
+#
+
+$(LINT):
+	@printf '# $@ installation path: ' >&2
+	@command -v $@ >&2 || { echo "ERROR: Cannot find $@" >&2; exit 1; }
+
+$(TEST):
+	@echo '# Prepare $@:' >&2
+	$(DOWNLOAD) $(TEST_SRC)
+	$(DOWNLOAD) $(TEST_SRC).sha256sum
+	$(SHA256) $@.sha256sum
+	chmod +x $@
